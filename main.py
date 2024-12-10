@@ -5,20 +5,32 @@ import sys
 import time
 import signal
 import gpiod
+import requests
 from edge_impulse_linux.image import ImageImpulseRunner
 from hx711 import HX711
 
 # Constants
 REFERENCE_UNIT = 186.0897222218
+SERVER_URL = "https://vpaygo.onrender.com/api/detections"
 runner = None
 
-# Tracking variables
+# Global variables
+count = 0
 list_label = []
 list_weight = []
-count = 0
 
-def now():
-    return round(time.time() * 1000)
+# Product pricing
+PRODUCT_PRICES = {
+    'Apple': {'base_price': 10, 'rate': 0.01},
+    'Monaco': {'base_price': 15, 'rate': 0},
+    'Lays': {'base_price': 20, 'rate': 0}
+}
+
+def calculate_price(label, weight):
+    if label in PRODUCT_PRICES:
+        price_info = PRODUCT_PRICES[label]
+        return price_info['base_price'] + (weight * price_info['rate'])
+    return 0
 
 def get_weight(hx, num_readings=20):
     try:
@@ -40,22 +52,59 @@ def init_hx711():
     return hx
 
 def process_detection(label, weight):
-
-
     global count, list_label, list_weight
     print(f"\nProcessing detection: {label} with weight {weight}g")
    
     if weight > 2:
-        list_weight.append(weight)
-        list_label.append(label)
-        count += 1
-        print(f"Detection Count: {count}")
-       
-        if count > 1 and list_label[-1] != list_label[-2]:
-            print("New item detected!")
-            print(f"Previous item: {list_label[-2]}")
-            print(f"Current item: {list_label[-1]}")
-            print(f"Weight: {weight}g")
+        try:
+            # Calculate price and send to server
+            price = calculate_price(label, weight)
+            data = {
+                "product": label,
+                "weight": weight,
+                "price": price
+            }
+            
+            # Add retry mechanism
+            max_retries = 3
+            retry_delay = 1  # seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    response = requests.post(
+                        SERVER_URL, 
+                        json=data,
+                        headers={'Content-Type': 'application/json'},
+                        timeout=5  # Add timeout
+                    )
+                    
+                    if response.status_code == 200:
+                        print(f"Sent to server successfully: {label}, {weight}g, ${price}")
+                        break
+                    else:
+                        print(f"Server returned status code: {response.status_code}")
+                        if attempt < max_retries - 1:
+                            print(f"Retrying in {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                except requests.exceptions.RequestException as e:
+                    print(f"Request failed: {e}")
+                    if attempt < max_retries - 1:
+                        print(f"Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+
+            list_weight.append(weight)
+            list_label.append(label)
+            count += 1
+            print(f"Detection Count: {count}")
+            
+            if count > 1 and list_label[-1] != list_label[-2]:
+                print("New item detected!")
+                print(f"Previous item: {list_label[-2]}")
+                print(f"Current item: {list_label[-1]}")
+                print(f"Weight: {weight}g")
+        except Exception as e:
+            print(f"Error communicating with server: {e}")
+            
     time.sleep(0.5)
 
 def sigint_handler(sig, frame):
@@ -84,7 +133,7 @@ def main():
             try:
                 print("\n=== Initializing Model ===")
                 model_info = runner.init()
-                print(f"Model loaded: {model_info['project']['owner']} / {model_info['project']['name']}")
+                print(f"Model loaded: {model_info['project']['name']}")
                 labels = model_info['model_parameters']['labels']
                 print(f"Available labels: {labels}")
 
